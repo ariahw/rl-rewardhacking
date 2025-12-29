@@ -1,0 +1,112 @@
+data:
+    seed: {{ seed }}
+    train_files: {{ train_dataset_parquet_path }}
+    val_files: {{ validation_dataset_parquet_path }}
+    train_batch_size: {{ train_batch_size }}
+    max_prompt_length: {{ max_prompt_length }}
+    max_response_length: {{ max_completion_length }}
+    filter_overlong_prompts: true
+    truncation: error
+    shuffle: true
+    prompt_key: prompt
+    reward_fn_key: data_source
+    val_batch_size: null
+    apply_chat_template_kwargs: {{ chat_template_kwargs }}
+    dataloader_num_workers: {{ dataloader_num_workers }}
+
+
+actor_rollout_ref:
+    model:
+        path: {{ model_id }}
+        lora_rank: {{ lora_rank }}
+        lora_alpha: {{ lora_alpha }}
+        target_modules: all-linear
+        use_remove_padding: true
+        enable_gradient_checkpointing: {{ enable_gradient_checkpointing }}
+        use_shm: true
+        use_fused_kernels: true
+    actor:
+        strategy: fsdp2
+        optim:
+            optimizer: {{ "AdamW8bit" if optim == "adamw_8bit" else "AdamW" }}
+            optimizer_impl: {{ "bitsandbytes.optim" if optim == "adamw_8bit" else "torch.optim" }}
+            lr: {{ learning_rate }}
+            lr_warmup_steps_ratio: {{ 0.0 if warmup_ratio is none else warmup_ratio }}
+            lr_warmup_steps: {{ warmup_steps if warmup_steps is not none else -1 }}
+            lr_scheduler_type: {{ "cosine" if lr_scheduler_type == "cosine" else "constant" }}
+            weight_decay: {{ weight_decay }}
+            betas: [{{ adam_beta1 }}, {{ adam_beta2 }}]
+            clip_grad: {{ max_grad_norm }}
+        ppo_mini_batch_size: {{ mini_batch_size }}
+        ppo_micro_batch_size_per_gpu: {{ per_device_batch_size }}
+        use_dynamic_bsz: {{ use_dynamic_bsz }}
+        ppo_max_token_len_per_gpu: {{ ppo_max_token_len_per_gpu }}
+        use_kl_loss: true # Must be true for GRPO
+        kl_loss_coef: {{ beta }}
+        kl_loss_type: low_var_kl
+        fsdp_config:
+            fsdp_size: -1
+            param_offload: false # MODIFIED
+            optimizer_offload: false # MODIFIED
+            model_dtype: bfloat16
+            dtype: bfloat16
+        ulysses_sequence_parallel_size: 1
+        checkpoint:
+            save_contents: {{ checkpoint_save_contents }}
+            load_contents: ${.save_contents}
+    rollout:
+        log_prob_micro_batch_size_per_gpu: {{ per_device_batch_size }}
+        tensor_model_parallel_size: 1 
+        name: {{ rollout_engine }}
+        mode: sync
+        gpu_memory_utilization: {{ gpu_memory_utilization }}
+        n: {{ num_generations }}
+        max_num_seqs: {{ max_num_seqs }}
+        max_model_len: {{ max_prompt_length + max_completion_length }}
+        max_num_batched_tokens: {{ max_num_batched_tokens }}
+        enable_chunked_prefill: false
+        layered_summon: false
+        load_format: safetensors # Required for LoRa
+        dtype: bfloat16
+        temperature: {{ temperature }}
+        top_p: {{ top_p }}
+        calculate_log_probs: false  # Disable logprobs to avoid CUDA memory access errors in vLLM
+        engine_kwargs:
+            vllm: {}
+    ref:
+        log_prob_micro_batch_size_per_gpu: {{ per_device_batch_size }}
+        fsdp_config:
+            param_offload: true
+
+reward_model:
+    reward_kwargs: 
+        seed: {{ seed }}
+        reward_specs: {{ reward_funcs_kwargs }}
+
+algorithm:
+    use_kl_in_reward: false
+    kl_ctrl:
+        kl_coef: {{ beta }}
+    screening_specs: {{ screening_funcs_kwargs }}
+
+trainer:
+    total_epochs: {{ total_epochs }}
+    total_training_steps: {{ max_steps }}
+    critic_warmup: 0
+    logger: ["console", "{{ report_to }}"] # NOTE: Other options potentially not supported by Verl
+    project_name: {{ wandb_project }}
+    experiment_name: {{ run_name }}
+    n_gpus_per_node: {{ n_gpus }}
+    nnodes: 1
+    save_freq: {{ save_steps }}
+    test_freq: -1
+    default_local_dir: {{ output_dir }}/checkpoints
+    rollout_data_dir: {{ output_dir }}/rollouts
+    max_actor_ckpt_to_keep: {{ save_total_limit }}
+
+# Custom extension: activation cache worker config (not used by core verl)
+activation_cache:
+    enabled: {{ cache_activations }}
+    layers: {{ cache_activations_layers }}
+    position: {{ cache_activations_position }}
+    batch_size: {{ per_device_batch_size }}
